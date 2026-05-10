@@ -177,8 +177,13 @@ class PlannerAgent:
                 "critic_issue_type": None,
                 "critic_feedback": None,
                 "failed_step_id": None,
-                # Служебная запись
-                "step_results": {**state.step_results, "_meta_plan": meta},
+                # При перепланировании сбрасываем воркерские слоты — старые результаты
+                # относились к неверному плану и могут запутать критика на новом проходе.
+                # _meta_* записи сохраняем — они нужны для отладки.
+                "step_results": {
+                    **{k: v for k, v in state.step_results.items() if k.startswith("_meta")},
+                    "_meta_plan": meta,
+                },
             }
 
         except Exception as e:

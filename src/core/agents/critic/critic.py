@@ -15,6 +15,11 @@ RETRY_LIMIT = 2
 
 _VALID_ISSUE_TYPES = {"ok", "step_failed", "plan_failed", "need_clarify"}
 
+_EXHAUSTED_MESSAGE = (
+    "Не удалось подготовить полный ответ за отведённое число попыток. "
+    "Попробуйте переформулировать запрос или уточнить параметры."
+)
+
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """Извлекает JSON из ответа LLM — сначала напрямую, затем поиском блока."""
@@ -63,7 +68,6 @@ def _fast_check(state: GraphState) -> Optional[Literal["step_failed", "need_clar
     """
     # Нет финального ответа совсем
     if not state.final_result:
-        # Есть failed шаги → step_failed
         failed = [
             k for k, v in state.step_results.items()
             if not k.startswith("_meta") and v.status == "failed"
@@ -91,10 +95,13 @@ class Critic:
        без LLM-вызова: нет final_result, есть failed шаги.
     2. LLM-проверка — для неочевидных случаев: релевантность, содержательность, достаточность.
 
+    При исчерпании RETRY_LIMIT — честно сигнализирует через status="failed"
+    и пишет понятное сообщение в final_result.
+
     Читает из state:  final_result, user_query, step_results, plan_steps,
                       plan_summary, plan_risks, retry_count.
     Пишет в state:    critic_issue_type, critic_feedback, failed_step_id,
-                      status, retry_count.
+                      status, retry_count, final_result (только при exhausted).
     """
 
     def __init__(self, llm: BaseChatModel):
@@ -104,9 +111,23 @@ class Critic:
         """Точка входа ноды. Возвращает патч GraphState."""
         logger.debug("ThreadID: %s: Critic старт (retry_count=%d)", state.thread_id, state.retry_count)
 
+        # Лимит исчерпан — честно завершаем с failed
+        if state.retry_count >= RETRY_LIMIT:
+            logger.warning(
+                "ThreadID: %s: Critic retry_count=%d >= лимита %d, завершаем с failed",
+                state.thread_id, state.retry_count, RETRY_LIMIT,
+            )
+            return {
+                "critic_issue_type": "ok",      # останавливаем цикл роутера
+                "critic_feedback": f"Лимит повторов ({RETRY_LIMIT}) исчерпан",
+                "failed_step_id": None,
+                "status": "failed",             # control_layer увидит → END
+                "final_result": _EXHAUSTED_MESSAGE,
+                "retry_count": state.retry_count,
+            }
+
         issue_type, failed_step_id, feedback = self._diagnose(state)
 
-        # Финализируем статус
         if issue_type == "ok":
             status = "ok"
             retry_count = state.retry_count
@@ -134,14 +155,7 @@ class Critic:
         Возвращает (issue_type, failed_step_id, feedback).
         Сначала быстрая проверка, затем LLM если нужно.
         """
-        # Лимит retry исчерпан — прекращаем цикл
-        if state.retry_count >= RETRY_LIMIT:
-            logger.warning(
-                "ThreadID: %s: Critic retry_count=%d >= лимита %d, завершаем",
-                state.thread_id, state.retry_count, RETRY_LIMIT,
-            )
-            return "ok", None, f"Лимит повторов ({RETRY_LIMIT}) исчерпан, отдаём текущий результат"
-
+        
         # Быстрая детерминированная проверка
         fast_result = _fast_check(state)
         if fast_result == "step_failed":
@@ -184,4 +198,3 @@ class Critic:
         except Exception as e:
             logger.error("ThreadID: %s: Critic LLM ошибка: %s", state.thread_id, e, exc_info=True)
             return "ok", None, f"Ошибка проверки: {e}"
-            

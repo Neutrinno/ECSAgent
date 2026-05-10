@@ -63,7 +63,7 @@ class ControlLayer:
             domain_explanation=DOMAIN_EXPLANATION,
             tools_description=tools_description,
         )
-        self.agent = create_react_agent(
+        self.agent = agent or create_react_agent(
             model=self.llm,
             tools=self.tools,
             prompt=prompt,
@@ -72,11 +72,16 @@ class ControlLayer:
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Основная точка входа ноды. Возвращает патч GraphState."""
 
+        # Критик исчерпал лимит retry — завершаем с честным сообщением
+        if state.status == "failed":
+            logger.warning("ControlLayer: получен status=failed от критика, завершаем")
+            return {"status": "failed", "final_result": state.final_result}
+
         # Повторный вход после критика с need_clarify
         if state.critic_issue_type == "need_clarify":
             return self._handle_clarify(state)
 
-        # Первый вход - интерпретация запроса
+        # Первый вход — интерпретация запроса
         return self._handle_initial(state)
 
     def _handle_initial(self, state: GraphState) -> Dict[str, Any]:
