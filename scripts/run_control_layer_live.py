@@ -1,6 +1,11 @@
 import argparse
 import json
+import sys
+from pathlib import Path
 from uuid import uuid4
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.agents.control_layer.control_layer import ControlLayer
 from src.core.graph_state import GraphState

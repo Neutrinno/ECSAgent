@@ -1,117 +1,212 @@
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.core.graph_state import GraphState
 from src.core.agents.orchestrator.system_prompt import ORCHESTRATOR_AGENT_PROMPT
+from src.core.graph_state import GraphState, PlanStep, StepResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SUPPORTED_AGENTS = {
+_ALLOWED_NEXT_AGENTS = {
     "sql_agent",
     "client_flow_agent",
     "network_optimizer_agent",
     "relocation_agent",
+    "aggregator",
 }
 
 
+def _extract_json(text: str) -> Dict[str, Any]:
+    """Извлекает JSON из ответа LLM — сначала напрямую, затем поиском блока."""
+    cleaned = text.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _get_ready_steps(
+    plan_steps: List[PlanStep],
+    completed_steps: List[str],
+) -> List[PlanStep]:
+    """
+    Возвращает шаги, готовые к запуску:
+    - не выполнены (step_id не в completed_steps);
+    - не aggregator (aggregator запускается отдельной логикой);
+    - все depends_on уже выполнены.
+    """
+    completed = set(completed_steps)
+    return [
+        step for step in plan_steps
+        if step.step_id not in completed
+        and step.agent != "aggregator"
+        and all(dep in completed for dep in step.depends_on)
+    ]
+
+
+def _all_worker_steps_done(
+    plan_steps: List[PlanStep],
+    completed_steps: List[str],
+) -> bool:
+    """Возвращает True если все шаги кроме aggregator выполнены."""
+    completed = set(completed_steps)
+    return all(
+        step.step_id in completed
+        for step in plan_steps
+        if step.agent != "aggregator"
+    )
+
+
+def _build_payload(state: GraphState) -> str:
+    """Формирует JSON-контекст для LLM."""
+    payload = {
+        "user_query": state.user_query,
+        "plan_summary": state.plan_summary,
+        "plan_steps": [step.model_dump() for step in state.plan_steps],
+        "completed_steps": state.completed_steps,
+        "failed_step_id": state.failed_step_id,
+        "step_results": {
+            k: {"agent": v.agent, "task": v.task, "status": v.status, "result": v.result}
+            for k, v in state.step_results.items()
+            if not k.startswith("_meta")
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 class Orchestrator:
-    """Оркестратор single-step sync-контура итерации 2."""
+    """Определяет следующий шаг плана на каждой итерации.
 
-    def __init__(self, llm: BaseChatModel, agent: Optional[Any] = None):
+    Логика выбора (детерминированная часть):
+    1. step_failed retry → перезапустить failed_step_id.
+    2. Есть готовые к запуску шаги → первый из них.
+    3. Все шаги выполнены → aggregator.
+
+    LLM используется как fallback когда детерминированная логика не даёт однозначного ответа.
+    Это снижает количество LLM-вызовов на простых линейных планах.
+
+    Читает из state:  plan_steps, completed_steps, failed_step_id, step_results, urf_codes.
+    Пишет в state:    next_agent, current_step_id, completed_steps (убирает failed),
+                      failed_step_id (сбрасывает после retry), step_results["_meta_orchestrator"].
+    """
+
+    def __init__(self, llm: BaseChatModel):
         self.llm = llm
-        self.prompt = ORCHESTRATOR_AGENT_PROMPT
-        if agent is not None:
-            self.agent = agent
-        elif self.llm is not None:
-            self.agent = create_react_agent(
-                model=self.llm,
-                tools=[],
-                prompt=self.prompt,
-            )
-        else:
-            self.agent = None
 
-    @staticmethod
-    def _extract_json(text: str) -> Dict[str, Any]:
-        cleaned = text.strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
+    def process_state(self, state: GraphState) -> Dict[str, Any]:
+        """Точка входа ноды. Возвращает патч GraphState."""
+        logger.debug("ThreadID: %s: Orchestrator старт", state.thread_id)
 
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            return {}
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return {}
+        next_agent, current_step_id, reason = self._determine_next(state)
 
-    @staticmethod
-    def _safe_next_agent(raw_value: Any) -> str:
-        value = str(raw_value or "").strip()
-        if value in SUPPORTED_AGENTS or value == "aggregator":
-            return value
-        return "aggregator"
+        # Обновляем completed_steps: убираем failed шаг чтобы он мог быть перезапущен
+        completed_steps = list(state.completed_steps)
+        failed_step_id = state.failed_step_id
+        if failed_step_id and failed_step_id in completed_steps:
+            completed_steps.remove(failed_step_id)
 
-    def _build_user_payload(self, state: GraphState) -> str:
-        payload = {
-            "user_query": state.user_query,
-            "urf_codes": state.urf_codes,
-            "plan_summary": state.plan_summary,
-            "plan_steps": state.plan_steps,
-            "current_next_agent": state.next_agent,
-            "need_retry": state.need_retry,
-            "last_result": state.result,
-            "intermediate_results": state.intermediate_results,
+        logger.info(
+            "ThreadID: %s: Orchestrator → %s (шаг: %s, причина: %s)",
+            state.thread_id, next_agent, current_step_id, reason,
+        )
+
+        meta = StepResult(
+            agent="orchestrator",
+            task="Выбор следующего шага",
+            result=f"next_agent={next_agent}, step={current_step_id}, reason={reason}",
+            status="ok",
+        )
+
+        return {
+            "next_agent": next_agent,
+            "current_step_id": current_step_id,
+            "completed_steps": completed_steps,
+            "failed_step_id": None,  # сбрасываем после обработки
+            "step_results": {**state.step_results, "_meta_orchestrator": meta},
         }
-        return json.dumps(payload, ensure_ascii=False)
 
-    def process_state(self, state: GraphState) -> GraphState:
-        state.current_agent = "orchestrator"
+    def _determine_next(
+        self, state: GraphState
+    ) -> tuple[str, Optional[str], str]:
+        """
+        Возвращает (next_agent, current_step_id, reason).
 
-        if state.need_replan:
-            state.need_replan = False
+        Сначала пробует детерминированную логику — она работает для большинства
+        линейных планов без LLM-вызова. Только если план неоднозначен — идёт в LLM.
+        """
+        plan_steps = state.plan_steps
+        completed_steps = state.completed_steps
+        failed_step_id = state.failed_step_id
 
-        if state.need_retry and not state.next_agent:
-            # Базовый retry-маршрут: повтор через SQL-ветку.
-            state.next_agent = "sql_agent"
+        # Пустой план → aggregator
+        if not plan_steps:
+            return "aggregator", None, "план пустой"
 
-        if self.agent is not None:
-            try:
-                input_messages = state.messages.copy() if state.messages else []
-                input_messages.append(HumanMessage(content=self._build_user_payload(state)))
-                response = self.agent.invoke({"messages": input_messages})
-                output_messages = response.get("messages") or []
-                raw_text = ""
-                for msg in output_messages:
-                    if isinstance(msg, AIMessage) and msg.content:
-                        raw_text = str(msg.content)
-                parsed = self._extract_json(raw_text)
-                llm_next_agent = self._safe_next_agent(parsed.get("next_agent"))
+        # Retry конкретного шага
+        if failed_step_id:
+            step = next((s for s in plan_steps if s.step_id == failed_step_id), None)
+            if step:
+                return step.agent, step.step_id, f"retry шага {failed_step_id}"
+            logger.warning("Orchestrator: failed_step_id=%s не найден в плане", failed_step_id)
 
-                if llm_next_agent == "aggregator" and state.need_retry and not state.next_agent:
-                    state.next_agent = "sql_agent"
-                else:
-                    state.next_agent = llm_next_agent
-                state.intermediate_results["orchestrator_decision"] = {
-                    "next_agent": state.next_agent,
-                    "reason": str(parsed.get("reason", "")).strip(),
-                }
-            except Exception as e:
-                logger.warning("ThreadID: %s: Orchestrator react-agent fallback, reason=%s", state.thread_id, e)
+        # Все воркеры выполнены → aggregator
+        if _all_worker_steps_done(plan_steps, completed_steps):
+            return "aggregator", None, "все шаги выполнены"
 
-        if state.next_agent in SUPPORTED_AGENTS or state.next_agent == "aggregator":
-            logger.info("ThreadID: %s: Orchestrator выбрал %s", state.thread_id, state.next_agent)
-            state.need_retry = False
-            return state
+        # Готовые к запуску шаги
+        ready = _get_ready_steps(plan_steps, completed_steps)
+        if len(ready) == 1:
+            # Один готовый шаг — детерминированный выбор
+            return ready[0].agent, ready[0].step_id, f"следующий шаг по плану: {ready[0].step_id}"
 
-        logger.info("ThreadID: %s: Orchestrator не получил next_agent, переход к aggregator", state.thread_id)
-        state.next_agent = "aggregator"
-        return state
+        if len(ready) > 1:
+            # Несколько готовых шагов — пока берём первый
+            # (параллельный запуск через Send будет добавлен позже)
+            step = ready[0]
+            return step.agent, step.step_id, f"первый из {len(ready)} готовых шагов: {step.step_id}"
+
+        # Нет готовых шагов и не все выполнены — нестандартная ситуация, идём в LLM
+        logger.warning(
+            "ThreadID: %s: Orchestrator: нет готовых шагов, запрашиваем LLM",
+            state.thread_id,
+        )
+        return self._ask_llm(state)
+
+    def _ask_llm(self, state: GraphState) -> tuple[str, Optional[str], str]:
+        """Fallback: спрашиваем LLM когда детерминированная логика не справилась."""
+        try:
+            response = self.llm.invoke([
+                SystemMessage(content=ORCHESTRATOR_AGENT_PROMPT.strip()),
+                HumanMessage(content=_build_payload(state)),
+            ])
+            raw = response.content if isinstance(response.content, str) else str(response.content)
+            parsed = _extract_json(raw)
+
+            next_agent_raw = str(parsed.get("next_agent", "")).strip()
+            next_agent = next_agent_raw if next_agent_raw in _ALLOWED_NEXT_AGENTS else "aggregator"
+            reason = str(parsed.get("reason", "LLM fallback")).strip()
+
+            # Пытаемся найти step_id для выбранного агента
+            current_step_id = None
+            for step in state.plan_steps:
+                if step.agent == next_agent and step.step_id not in state.completed_steps:
+                    current_step_id = step.step_id
+                    break
+
+            return next_agent, current_step_id, reason
+
+        except Exception as e:
+            logger.error("ThreadID: %s: Orchestrator LLM fallback ошибка: %s", state.thread_id, e)
+            return "aggregator", None, f"ошибка LLM fallback: {e}"
+            

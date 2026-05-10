@@ -63,7 +63,7 @@ class ControlLayer:
             domain_explanation=DOMAIN_EXPLANATION,
             tools_description=tools_description,
         )
-        self.agent = agent or create_react_agent(
+        self.agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
             prompt=prompt,
