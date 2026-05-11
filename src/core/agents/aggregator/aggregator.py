@@ -11,9 +11,20 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _get_worker_results(step_results: Dict[str, StepResult]) -> Dict[str, StepResult]:
-    """Возвращает только результаты воркеров — без служебных _meta_* записей."""
-    return {k: v for k, v in step_results.items() if not k.startswith("_meta")}
+def _get_current_plan_results(state: GraphState) -> Dict[str, StepResult]:
+    """Возвращает только результаты шагов текущего плана (без stale и _meta)."""
+    plan_step_map = {step.step_id: step for step in state.plan_steps if step.agent != "aggregator"}
+    results: Dict[str, StepResult] = {}
+    for step_id, result in state.step_results.items():
+        if step_id.startswith("_meta"):
+            continue
+        step = plan_step_map.get(step_id)
+        if not step:
+            continue
+        if result.agent != step.agent:
+            continue
+        results[step_id] = result
+    return results
 
 
 def _build_payload(state: GraphState, worker_results: Dict[str, StepResult]) -> str:
@@ -48,7 +59,7 @@ class Aggregator:
         """Точка входа ноды. Возвращает патч GraphState."""
         logger.debug("ThreadID: %s: Aggregator старт", state.thread_id)
 
-        worker_results = _get_worker_results(state.step_results)
+        worker_results = _get_current_plan_results(state)
 
         # Нет ни одного результата — возвращаем заглушку без LLM-вызова
         if not worker_results:

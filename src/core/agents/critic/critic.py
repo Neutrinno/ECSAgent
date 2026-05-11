@@ -6,7 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.agents.critic.system_prompt import CRITIC_PROMPT
-from src.core.graph_state import GraphState
+from src.core.graph_state import GraphState, StepResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,8 +46,7 @@ def _build_payload(state: GraphState) -> str:
             "result": v.result,
             "status": v.status,
         }
-        for k, v in state.step_results.items()
-        if not k.startswith("_meta")
+        for k, v in _get_current_plan_results(state).items()
     }
     payload = {
         "user_query": state.user_query,
@@ -66,11 +65,13 @@ def _fast_check(state: GraphState) -> Optional[Literal["step_failed", "need_clar
     Детерминированная быстрая проверка до LLM-вызова.
     Возвращает диагноз если ситуация однозначна, иначе None → идём в LLM.
     """
+    current_results = _get_current_plan_results(state)
+
     # Нет финального ответа совсем
     if not state.final_result:
         failed = [
-            k for k, v in state.step_results.items()
-            if not k.startswith("_meta") and v.status == "failed"
+            k for k, v in current_results.items()
+            if v.status == "failed"
         ]
         if failed:
             return "step_failed"
@@ -78,13 +79,29 @@ def _fast_check(state: GraphState) -> Optional[Literal["step_failed", "need_clar
 
     # Есть явно failed шаги в step_results
     failed_steps = [
-        k for k, v in state.step_results.items()
-        if not k.startswith("_meta") and v.status == "failed"
+        k for k, v in current_results.items()
+        if v.status == "failed"
     ]
     if failed_steps:
         return "step_failed"
 
     return None  # неоднозначно → решает LLM
+
+
+def _get_current_plan_results(state: GraphState) -> Dict[str, StepResult]:
+    """Возвращает только результаты шагов текущего плана (без stale и _meta)."""
+    plan_step_map = {step.step_id: step for step in state.plan_steps if step.agent != "aggregator"}
+    results: Dict[str, StepResult] = {}
+    for step_id, result in state.step_results.items():
+        if step_id.startswith("_meta"):
+            continue
+        step = plan_step_map.get(step_id)
+        if not step:
+            continue
+        if result.agent != step.agent:
+            continue
+        results[step_id] = result
+    return results
 
 
 class Critic:
@@ -159,9 +176,9 @@ class Critic:
         # Быстрая детерминированная проверка
         fast_result = _fast_check(state)
         if fast_result == "step_failed":
+            current_results = _get_current_plan_results(state)
             failed_step_id = next(
-                (k for k, v in state.step_results.items()
-                 if not k.startswith("_meta") and v.status == "failed"),
+                (k for k, v in current_results.items() if v.status == "failed"),
                 None,
             )
             return "step_failed", failed_step_id, f"Шаг {failed_step_id} завершился с ошибкой"

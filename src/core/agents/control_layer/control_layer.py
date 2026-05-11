@@ -72,6 +72,13 @@ class ControlLayer:
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Основная точка входа ноды. Возвращает патч GraphState."""
 
+        # Успешный терминальный кейс после критика: не запускаем пайплайн заново.
+        if state.status == "ok" and state.final_result:
+            logger.info(
+                "ControlLayer: status=ok и final_result присутствует -> завершаем без ре-инициализации"
+            )
+            return {"status": "ok", "final_result": state.final_result}
+
         # Критик исчерпал лимит retry — завершаем с честным сообщением
         if state.status == "failed":
             logger.warning("ControlLayer: получен status=failed от критика, завершаем")
@@ -87,7 +94,8 @@ class ControlLayer:
     def _handle_initial(self, state: GraphState) -> Dict[str, Any]:
         """Первый вход: интерпретация запроса, резолюция urf_code."""
         messages = state.messages.copy()
-        if state.user_query:
+        # user_query обычно уже добавлен в start_agent; добавляем только если история пуста.
+        if not messages and state.user_query:
             messages.append(HumanMessage(content=state.user_query))
 
         response = self.agent.invoke({"messages": messages})

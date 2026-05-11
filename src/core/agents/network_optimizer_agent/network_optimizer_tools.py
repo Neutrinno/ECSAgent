@@ -1,7 +1,7 @@
 """Инструменты network_optimizer_agent.
 
-Оставлен сценарий закрытия ВСП (`calculate_close_vsp`) и справочный
-`get_vsp_info`. Логика перемещения вынесена в `movement_old/` в корне репозитория.
+В текущем контуре используется только расчет сценариев закрытия ВСП
+(`calculate_close_vsp`). Логика перемещения вынесена в `movement_old/`.
 """
 
 import json
@@ -279,46 +279,3 @@ def calculate_close_vsp(
     result = _serialize_closure_result(df_asinh, df_sinh, scenario, warnings)
     logger.info(f"Расчёт закрытия завершён, длина JSON: {len(result)} символов")
     return result
-
-
-@tool
-def get_vsp_info(vsp_code: str) -> str:
-    """
-    Получает информацию о конкретном ВСП из базы данных.
-
-    Args:
-        vsp_code: Номер ВСП (например, '8627_01377')
-
-    Returns:
-        Текстовая информация о ВСП: адрес, показатели, площадь
-    """
-    try:
-
-        cs_vsp = VSPAnalyzer.to_naming(pd.read_excel('data/ЦС_ВСП_v8.xlsx'))
-        vsp_data = cs_vsp[cs_vsp['urf_code'] == vsp_code]
-
-        if vsp_data.empty:
-            return f"ВСП {vsp_code} не найден в базе данных"
-
-        row = vsp_data.iloc[0]
-
-        info_parts = [
-            f"📍 ВСП {vsp_code}",
-            f"Адрес: {row.get('address', 'н/д')}",
-            f"Город: {row.get('city', 'н/д')} ({row.get('city_type', 'н/д')})",
-            f" \n Показатели: ",
-            f"  • Продажи УП: {row.get('sale_up', 0): .0f}",
-            f"  • КП СКМ: {row.get('kp_skm', 0): .0f}",
-            f"  • КП СМО: {row.get('kp_smo', 0): .0f}",
-            f"  • Общий КП: {row.get('all_kp', 0): .0f}",
-            f" \n Ресурсы: ",
-            f"  • РМ СКМ: {row.get('rm_skm', 0): .0f}",
-            f"  • РМ СМО: {row.get('rm_smo', 0): .0f}",
-            f"  • Площадь факт: {row.get('fact_square', 0):.0f} м²",
-            f"  • Площадь норм: {row.get('norm_square', 0):.0f} м²"
-        ]
-
-        return "\n".join(info_parts)
-
-    except Exception as e:
-        return f"❌ Ошибка при получении информации о ВСП: {str(e)}"

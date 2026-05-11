@@ -60,6 +60,69 @@ def _parse_plan_steps(raw: Any) -> List[PlanStep]:
     return steps
 
 
+def _normalize_plan_steps(steps: List[PlanStep]) -> List[PlanStep]:
+    """Нормализует план: уникальные step_id и валидные зависимости."""
+    if not steps:
+        return []
+
+    old_ids = [step.step_id for step in steps]
+    old_to_new: Dict[str, str] = {}
+    normalized: List[PlanStep] = []
+
+    # Переиндексация в стабильный формат step_1..step_N.
+    for idx, step in enumerate(steps, start=1):
+        new_step_id = f"step_{idx}"
+        if step.step_id in old_to_new:
+            logger.warning(
+                "Planner: дублирующийся step_id '%s', шаг переиндексирован в '%s'",
+                step.step_id,
+                new_step_id,
+            )
+        else:
+            old_to_new[step.step_id] = new_step_id
+
+        normalized.append(
+            PlanStep(
+                step_id=new_step_id,
+                agent=step.agent,
+                task=step.task,
+                depends_on=[],
+                parallel_group=step.parallel_group,
+            )
+        )
+
+    valid_ids = {step.step_id for step in normalized}
+    for idx, step in enumerate(steps):
+        current_new_id = normalized[idx].step_id
+        seen_deps: set[str] = set()
+        deps: List[str] = []
+
+        for dep in step.depends_on:
+            new_dep = old_to_new.get(dep)
+            if not new_dep:
+                logger.warning(
+                    "Planner: удалена невалидная зависимость '%s' у шага '%s'",
+                    dep,
+                    old_ids[idx],
+                )
+                continue
+            if new_dep == current_new_id:
+                logger.warning(
+                    "Planner: удалена self-dependency '%s' у шага '%s'",
+                    dep,
+                    old_ids[idx],
+                )
+                continue
+            if new_dep not in valid_ids or new_dep in seen_deps:
+                continue
+            seen_deps.add(new_dep)
+            deps.append(new_dep)
+
+        normalized[idx].depends_on = deps
+
+    return normalized
+
+
 def _parse_risks(raw: Any) -> List[str]:
     if not isinstance(raw, list):
         return []
@@ -138,7 +201,7 @@ class PlannerAgent:
             user_content = _build_user_payload(state)
             parsed = self._invoke_llm(user_content)
 
-            plan_steps = _parse_plan_steps(parsed.get("plan_steps", []))
+            plan_steps = _normalize_plan_steps(_parse_plan_steps(parsed.get("plan_steps", [])))
             plan_summary = str(parsed.get("plan_summary", "")).strip() or "План сформирован"
             plan_risks = _parse_risks(parsed.get("plan_risks", []))
 
@@ -178,13 +241,10 @@ class PlannerAgent:
                 "critic_issue_type": None,
                 "critic_feedback": None,
                 "failed_step_id": None,
-                # При перепланировании сбрасываем воркерские слоты — старые результаты
-                # относились к неверному плану и могут запутать критика на новом проходе.
-                # _meta_* записи сохраняем — они нужны для отладки.
-                "step_results": {
-                    **{k: v for k, v in state.step_results.items() if k.startswith("_meta")},
-                    "_meta_plan": meta,
-                },
+                # Planner пишет только свою служебную запись.
+                # Старые worker-слоты могут оставаться в state из-за reducer-merge и
+                # должны игнорироваться downstream-логикой, если не относятся к текущему плану.
+                "step_results": {"_meta_plan": meta},
             }
 
         except Exception as e:

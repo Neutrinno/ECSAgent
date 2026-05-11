@@ -1,15 +1,73 @@
+import json
+from typing import Any, Dict
+
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt import create_react_agent
-from langgraph.errors import ParentCommand
-from typing import Dict, Any
 
 from src.core.agents.relocation_agent.relocation_agent_tools import RELOCATION_AGENT_TOOLS
 from src.core.agents.relocation_agent.system_prompt import RELOCATION_AGENT_PROMPT
-from src.core.graph_state import GraphState
+from src.core.graph_state import GraphState, StepResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _build_payload(state: GraphState, task: str, dependent_results: Dict[str, str]) -> str:
+    """Формирует JSON-контекст для ReAct relocation-агента."""
+    payload: Dict[str, Any] = {
+        "task": task,
+        "urf_codes": state.urf_codes,
+    }
+    if dependent_results:
+        payload["dependent_results"] = dependent_results
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _extract_result(response: dict) -> str:
+    """Извлекает финальный текст ответа из истории сообщений ReAct-агента."""
+    for msg in reversed(response.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content).strip()
+    return ""
+
+
+def _extract_tools_called(response: dict) -> list:
+    """Извлекает список вызванных инструментов из истории сообщений."""
+    tools_called = []
+    for msg in response.get("messages", []):
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls"):
+            for tc in msg.tool_calls or []:
+                tools_called.append({
+                    "tool": tc.get("name"),
+                    "args": tc.get("args", {}),
+                })
+    return tools_called
+
+
+def _extract_tool_error(response: dict) -> str | None:
+    """Извлекает ошибку инструмента из ToolMessage (если есть)."""
+    for msg in response.get("messages", []):
+        if not isinstance(msg, ToolMessage):
+            continue
+
+        content = str(msg.content or "").strip()
+        if not content:
+            continue
+        if content.startswith("❌"):
+            return content
+
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            error = str(payload.get("error") or "").strip()
+            error_type = str(payload.get("error_type") or "").strip()
+            return f"{error_type}: {error}" if error_type else error or content
+
+    return None
 
 
 class RelocationAgent:
@@ -28,69 +86,80 @@ class RelocationAgent:
                                         prompt=self.prompt)
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
-        """
-        Основной метод обработки состояния графа.
-        Вызывается из LangGraph как нода.
-        """
+        """Точка входа ноды. Возвращает патч GraphState."""
+        current_step_id = state.current_step_id
+        if not current_step_id:
+            msg = "RelocationAgent: current_step_id отсутствует, выполнение шага невозможно"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {"error": msg}
+
+        logger.debug(
+            "ThreadID: %s: RelocationAgent старт (шаг: %s)",
+            state.thread_id, current_step_id,
+        )
+
+        step = next((s for s in state.plan_steps if s.step_id == current_step_id), None)
+        if not step:
+            msg = f"RelocationAgent: шаг {current_step_id} не найден в plan_steps"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {
+                "step_results": {
+                    current_step_id: StepResult(
+                        agent="relocation_agent",
+                        task="guard_check",
+                        result=msg,
+                        status="failed",
+                    )
+                },
+                "completed_steps": [current_step_id],
+            }
+
+        task = step.task
+        dependent_results: Dict[str, str] = {}
+        for dep_id in step.depends_on:
+            dep = state.step_results.get(dep_id)
+            if dep and dep.status == "ok" and dep.result:
+                dependent_results[dep_id] = dep.result
+
         try:
-            if not state.user_query and not state.messages:
-                raise ValueError("No query or messages provided")
+            response = self.agent.invoke({
+                "messages": [HumanMessage(content=_build_payload(state, task, dependent_results))]
+            })
+            out = _extract_result(response)
+            tools_called = _extract_tools_called(response)
+            tool_error = _extract_tool_error(response)
 
-            logger.info(f"ThreadID: {state.thread_id}: Starting Relocation agent")
-
-            context_parts = []
-            if state.query_params:
-                params = state.query_params
-                logger.info(f"ThreadID: {state.thread_id}: Получены параметры запроса: "
-                            f"is_close={params.is_close}, "
-                            f"is_cs={params.is_cs}, "
-                            f"is_bt={params.is_bt}, "
-                            f"координат={len(params.coordinates)}")
-
-                context_parts.append("## ПАРАМЕТРЫ ЗАПРОСА:")
-                if params.is_close:
-                    context_parts.append(f"ВСП для закрытия (is_close): {params.is_close}")
-                if params.is_cs:
-                    context_parts.append(f"ВСП для возврата в сеть (is_cs): {params.is_cs}")
-                if params.is_bt:
-                    context_parts.append(f"ВСП для приема клиентопотока (is_bt): {params.is_bt}")
-                if params.coordinates:
-                    context_parts.append(f"Координаты ВСП: {params.coordinates}")
-            else:
-                logger.warning(f"ThreadID: {state.thread_id}: Параметры запроса не найдены в state")
-
-            if state.messages:
-                messages = state.messages.copy()
-                if context_parts:
-                    context_message = HumanMessage(content="\n".join(context_parts))
-                    messages.append(context_message)
-            else:
-                user_content = state.user_query
-                if context_parts:
-                    user_content = "\n\n".join([state.user_query] + context_parts)
-                messages = [HumanMessage(content=user_content)]
-
-            resp = self.agent.invoke({"messages": messages})
-
-            raw = resp["messages"][-1].content if resp["messages"] else ""
-            out = raw if isinstance(raw, str) else str(raw)
+            status = "failed" if tool_error else "ok"
+            if tool_error and not out:
+                out = tool_error
             logger.info(
-                "ThreadID: %s: Relocation agent завершён, result_len=%s",
+                "ThreadID: %s: RelocationAgent завершён (шаг: %s, result_len=%d, tools=%d)",
                 state.thread_id,
+                current_step_id,
                 len(out),
+                len(tools_called),
             )
-            return {
-                "messages": resp["messages"],
-                "result": out,
-            }
+            step_result = StepResult(
+                agent="relocation_agent",
+                task=task,
+                result=out,
+                tools_called=tools_called,
+                status=status,
+            )
 
-        except ParentCommand:
-            logger.info(f"ThreadID: {state.thread_id}: Relocation agent completed, transitioning to next agent")
-            raise
         except Exception as e:
-            logger.error(f"ThreadID: {state.thread_id}: Relocation  agent error: {str(e)}")
-            return {
-                "error": str(e),
-                "agent_type": "relocation_agent",
-                "error_type": type(e).__name__
-            }
+            logger.error(
+                "ThreadID: %s: RelocationAgent ошибка (шаг: %s): %s",
+                state.thread_id, current_step_id, e, exc_info=True,
+            )
+            step_result = StepResult(
+                agent="relocation_agent",
+                task=task,
+                result=str(e),
+                status="failed",
+            )
+
+        return {
+            "step_results": {current_step_id: step_result},
+            "completed_steps": [current_step_id],
+        }

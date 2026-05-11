@@ -1,19 +1,52 @@
+import json
+from typing import Any, Dict
+
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.prebuilt import create_react_agent
-from langgraph.errors import ParentCommand
-from typing import Dict, Any
 
 from src.core.agents.sql_agent.prompt import SQL_AGENT_PROMPT
 from src.core.agents.sql_agent.tools import (
-    get_table_schema,
     execute_sql_query,
+    get_table_schema,
     list_tables_with_descriptions,
 )
-from src.core.graph_state import GraphState
+from src.core.graph_state import GraphState, StepResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _build_payload(state: GraphState, task: str, dependent_results: Dict[str, str]) -> str:
+    """Формирует JSON-контекст для ReAct SQL-агента."""
+    payload: Dict[str, Any] = {
+        "task": task,
+        "urf_codes": state.urf_codes,
+    }
+    if dependent_results:
+        payload["dependent_results"] = dependent_results
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _extract_result(response: dict) -> str:
+    """Извлекает финальный текст ответа из истории сообщений ReAct-агента."""
+    for msg in reversed(response.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content).strip()
+    return ""
+
+
+def _extract_tools_called(response: dict) -> list:
+    """Извлекает список вызванных инструментов из истории сообщений."""
+    tools_called = []
+    for msg in response.get("messages", []):
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls"):
+            for tc in msg.tool_calls or []:
+                tools_called.append({
+                    "tool": tc.get("name"),
+                    "args": tc.get("args", {}),
+                })
+    return tools_called
 
 
 class SQLAgent:
@@ -40,30 +73,74 @@ class SQLAgent:
                                         prompt=self.prompt)
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
-        """
-        Основной метод обработки состояния графа.
-        Вызывается из LangGraph как нода.
-        """
+        """Точка входа ноды. Возвращает патч GraphState."""
+        current_step_id = state.current_step_id
+        if not current_step_id:
+            msg = "SQLAgent: current_step_id отсутствует, выполнение шага невозможно"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {"error": msg}
+
+        logger.debug(
+            "ThreadID: %s: SQLAgent старт (шаг: %s)",
+            state.thread_id, current_step_id,
+        )
+
+        step = next((s for s in state.plan_steps if s.step_id == current_step_id), None)
+        if not step:
+            msg = f"SQLAgent: шаг {current_step_id} не найден в plan_steps"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {
+                "step_results": {
+                    current_step_id: StepResult(
+                        agent="sql_agent",
+                        task="guard_check",
+                        result=msg,
+                        status="failed",
+                    )
+                },
+                "completed_steps": [current_step_id],
+            }
+
+        task = step.task
+        dependent_results: Dict[str, str] = {}
+        for dep_id in step.depends_on:
+            dep = state.step_results.get(dep_id)
+            if dep and dep.status == "ok" and dep.result:
+                dependent_results[dep_id] = dep.result
+
         try:
-            if not state.user_query and not state.messages:
-                raise ValueError("No query or messages provided")
+            response = self.agent.invoke({
+                "messages": [HumanMessage(content=_build_payload(state, task, dependent_results))]
+            })
+            result_text = _extract_result(response)
+            tools_called = _extract_tools_called(response)
 
-            logger.info(f"ThreadID: {state.thread_id}: Starting SQL agent")
-            messages = state.messages if state.messages else [HumanMessage(content=state.user_query)]
-            resp = self.agent.invoke({"messages": messages})
+            logger.info(
+                "ThreadID: %s: SQLAgent завершён (шаг: %s, result_len=%d, tools=%d)",
+                state.thread_id, current_step_id, len(result_text), len(tools_called),
+            )
 
-            return {
-                "messages": resp["messages"],
-                "result": resp["messages"][-1].content if resp["messages"] else ""
-            }
+            step_result = StepResult(
+                agent="sql_agent",
+                task=task,
+                result=result_text,
+                tools_called=tools_called,
+                status="ok",
+            )
 
-        except ParentCommand:
-            logger.info(f"ThreadID: {state.thread_id}: SQL agent completed, transitioning to analyst")
-            raise
         except Exception as e:
-            logger.error(f"ThreadID: {state.thread_id}: SQL agent error: {str(e)}")
-            return {
-                "error": str(e),
-                "agent_type": "sql_agent",
-                "error_type": type(e).__name__
-            }
+            logger.error(
+                "ThreadID: %s: SQLAgent ошибка (шаг: %s): %s",
+                state.thread_id, current_step_id, e, exc_info=True,
+            )
+            step_result = StepResult(
+                agent="sql_agent",
+                task=task,
+                result=str(e),
+                status="failed",
+            )
+
+        return {
+            "step_results": {current_step_id: step_result},
+            "completed_steps": [current_step_id],
+        }

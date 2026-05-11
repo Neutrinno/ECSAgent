@@ -24,6 +24,9 @@ def _merge_completed_steps(left: List[str], right: List[str]) -> List[str]:
     При параллельном исполнении оба воркера добавляют свой step_id —
     reducer гарантирует что оба попадут в список.
     """
+    # Явный reset от planner при (пере)планировании.
+    if right == []:
+        return []
     return list(dict.fromkeys(left + right))
 
 

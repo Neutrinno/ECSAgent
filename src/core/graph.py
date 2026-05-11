@@ -66,14 +66,14 @@ def route_from_control(state: GraphState | dict) -> str:
     critic_issue_type = _get_state_attr(state, "critic_issue_type")
     status = _get_state_attr(state, "status")
 
-    # Прямой ответ без пайплайна
-    if control_answer and not critic_issue_type:
-        logger.info("ThreadID: %s: direct answer from control_layer, завершаем", tid)
-        return "end"
-
     # Терминальные статусы
     if status in ("ok", "failed"):
         logger.info("ThreadID: %s: терминальный статус %s", tid, status)
+        return "end"
+
+    # Прямой ответ без пайплайна
+    if control_answer and not critic_issue_type:
+        logger.info("ThreadID: %s: direct answer from control_layer, завершаем", tid)
         return "end"
 
     # После критика — маршрут по диагнозу

@@ -1,6 +1,6 @@
-"""Простой smoke-тест конкретной ноды network_optimizer_agent."""
+"""Простой smoke-тест конкретной ноды sql_agent."""
 
-from src.core.agents.network_optimizer_agent.network_optimizer_agent import NetworkOptimizerAgent
+from src.core.agents.sql_agent.sql_agent import SQLAgent
 from src.core.graph_state import GraphState, PlanStep
 from src.core.llm_utils.llm_factory import llm
 
@@ -10,23 +10,23 @@ def main() -> None:
     urf_code = "059_6734_122"
 
     state = GraphState(
-        user_query=f"Рассчитать закрытие ВСП {urf_code}",
+        user_query=f"Какая площадь у ВСП 059_6734_122?",
         urf_codes=[urf_code],
         plan_steps=[
             PlanStep(
                 step_id=step_id,
-                agent="network_optimizer_agent",
-                task=f"Рассчитать закрытие ВСП {urf_code}",
+                agent="sql_agent",
+                task=f"Получить фактическую и нормативную площадь ВСП {urf_code}",
                 depends_on=[],
             )
         ],
         current_step_id=step_id,
     )
 
-    agent = NetworkOptimizerAgent(llm=llm)
+    agent = SQLAgent(llm=llm)
     patch = agent.process_state(state)
 
-    print("=== PATCH FROM network_optimizer_agent ===")
+    print("=== PATCH FROM sql_agent ===")
     print(patch)
 
 

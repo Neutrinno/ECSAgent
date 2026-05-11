@@ -8,7 +8,10 @@ from langgraph.prebuilt import create_react_agent
 from src.core.agents.network_optimizer_agent.network_optimizer_tools import (
     calculate_close_vsp,
 )
-from src.core.agents.network_optimizer_agent.system_prompt import NETWORK_OPTIMIZER_PROMPT
+from src.core.agents.network_optimizer_agent.system_prompt import (
+    DOMAIN_EXPLANATION,
+    NETWORK_OPTIMIZER_PROMPT,
+)
 from src.core.graph_state import GraphState, StepResult
 from src.utils.logger import get_logger
 
@@ -65,15 +68,27 @@ class NetworkOptimizerAgent:
 
     def __init__(self, llm: BaseChatModel):
         self.tools = [calculate_close_vsp]
+        tools_description = "\n".join(
+            f"- {tool.name}: {tool.description}" for tool in self.tools
+        )
+        prompt = NETWORK_OPTIMIZER_PROMPT.format(
+            domain_explanation=DOMAIN_EXPLANATION,
+            tools_description=tools_description,
+        )
         self.agent = create_react_agent(
             model=llm,
             tools=self.tools,
-            prompt=NETWORK_OPTIMIZER_PROMPT.strip(),
+            prompt=prompt.strip(),
         )
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Точка входа ноды. Возвращает патч GraphState."""
         current_step_id = state.current_step_id
+        if not current_step_id:
+            msg = "NetworkOptimizerAgent: current_step_id отсутствует, выполнение шага невозможно"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {"error": msg}
+
         logger.debug(
             "ThreadID: %s: NetworkOptimizerAgent старт (шаг: %s)",
             state.thread_id, current_step_id,
@@ -83,15 +98,29 @@ class NetworkOptimizerAgent:
         step = next(
             (s for s in state.plan_steps if s.step_id == current_step_id), None
         )
-        task = step.task if step else state.user_query
+        if not step:
+            msg = f"NetworkOptimizerAgent: шаг {current_step_id} не найден в plan_steps"
+            logger.error("ThreadID: %s: %s", state.thread_id, msg)
+            return {
+                "step_results": {
+                    current_step_id: StepResult(
+                        agent="network_optimizer_agent",
+                        task="guard_check",
+                        result=msg,
+                        status="failed",
+                    )
+                },
+                "completed_steps": [current_step_id],
+            }
+
+        task = step.task
 
         # Собираем результаты зависимых шагов — агент читает их через dependent_results
         dependent_results: Dict[str, str] = {}
-        if step:
-            for dep_id in step.depends_on:
-                dep = state.step_results.get(dep_id)
-                if dep and dep.result:
-                    dependent_results[dep_id] = dep.result
+        for dep_id in step.depends_on:
+            dep = state.step_results.get(dep_id)
+            if dep and dep.status == "ok" and dep.result:
+                dependent_results[dep_id] = dep.result
 
         try:
             response = self.agent.invoke({

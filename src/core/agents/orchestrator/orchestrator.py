@@ -68,18 +68,47 @@ def _all_worker_steps_done(
     )
 
 
+def _get_current_plan_results(state: GraphState) -> Dict[str, StepResult]:
+    """Возвращает результаты шагов, относящихся к текущему plan_steps."""
+    plan_step_map = {step.step_id: step for step in state.plan_steps}
+    results: Dict[str, StepResult] = {}
+    for step_id, result in state.step_results.items():
+        if step_id.startswith("_meta"):
+            continue
+        step = plan_step_map.get(step_id)
+        if not step:
+            continue
+        if result.agent != step.agent:
+            continue
+        results[step_id] = result
+    return results
+
+
+def _get_effective_completed_steps(state: GraphState) -> List[str]:
+    """completed_steps только для шагов текущего плана с валидным status=ok."""
+    current_results = _get_current_plan_results(state)
+    effective: List[str] = []
+    for step_id in state.completed_steps:
+        result = current_results.get(step_id)
+        if not result or result.status != "ok":
+            continue
+        if step_id not in effective:
+            effective.append(step_id)
+    return effective
+
+
 def _build_payload(state: GraphState) -> str:
     """Формирует JSON-контекст для LLM."""
+    current_results = _get_current_plan_results(state)
     payload = {
         "user_query": state.user_query,
         "plan_summary": state.plan_summary,
         "plan_steps": [step.model_dump() for step in state.plan_steps],
-        "completed_steps": state.completed_steps,
+        "completed_steps": _get_effective_completed_steps(state),
         "failed_step_id": state.failed_step_id,
         "step_results": {
             k: {"agent": v.agent, "task": v.task, "status": v.status, "result": v.result}
-            for k, v in state.step_results.items()
-            if not k.startswith("_meta")
+            for k, v in current_results.items()
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -111,7 +140,7 @@ class Orchestrator:
         next_agent, current_step_id, reason = self._determine_next(state)
 
         # Обновляем completed_steps: убираем failed шаг чтобы он мог быть перезапущен
-        completed_steps = list(state.completed_steps)
+        completed_steps = _get_effective_completed_steps(state)
         failed_step_id = state.failed_step_id
         if failed_step_id and failed_step_id in completed_steps:
             completed_steps.remove(failed_step_id)
@@ -146,7 +175,7 @@ class Orchestrator:
         линейных планов без LLM-вызова. Только если план неоднозначен — идёт в LLM.
         """
         plan_steps = state.plan_steps
-        completed_steps = state.completed_steps
+        completed_steps = _get_effective_completed_steps(state)
         failed_step_id = state.failed_step_id
 
         # Пустой план → aggregator
