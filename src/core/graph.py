@@ -1,10 +1,22 @@
+from typing import List, Union
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
-from src.core.graph_state import GraphState
+from src.core.graph_state import GraphState, PlanStep
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Допустимые цели маршрутизации из оркестратора
+_WORKER_AGENTS = {
+    "sql_agent",
+    "client_flow_agent",
+    "network_optimizer_agent",
+    "relocation_agent",
+}
+_ALLOWED_NEXT_AGENTS = _WORKER_AGENTS | {"aggregator"}
 
 
 # =========================
@@ -15,6 +27,21 @@ def _get_state_attr(state: GraphState | dict, name: str):
     if isinstance(state, dict):
         return state.get(name)
     return getattr(state, name, None)
+
+
+def _get_ready_steps(
+    plan_steps: List[PlanStep],
+    completed_steps: List[str],
+) -> List[PlanStep]:
+    """Возвращает шаги готовые к запуску: не выполнены, не aggregator,
+    все зависимости выполнены."""
+    completed = set(completed_steps)
+    return [
+        step for step in plan_steps
+        if step.step_id not in completed
+        and step.agent != "aggregator"
+        and all(dep in completed for dep in step.depends_on)
+    ]
 
 
 # =========================
@@ -70,27 +97,56 @@ def route_from_control(state: GraphState | dict) -> str:
     return "planner_agent"
 
 
-def route_from_orchestrator(state: GraphState | dict) -> str:
-    """Оркестратор выбирает следующий шаг плана.
+def route_from_orchestrator(
+    state: GraphState | dict,
+) -> Union[str, List[Send]]:
+    """Роутинг из orchestrator.
 
-    Возвращает имя следующего агента из фиксированного списка допустимых целей.
-    При неизвестном значении next_agent — fallback на aggregator.
+    При одном готовом шаге — возвращает строку (обычный маршрут).
+    При нескольких шагах одной parallel_group — возвращает List[Send]
+    для параллельного запуска через LangGraph Send.
+    Fallback при любой неопределённости — aggregator.
     """
     tid = _get_state_attr(state, "thread_id")
     next_agent = _get_state_attr(state, "next_agent")
+    plan_steps = _get_state_attr(state, "plan_steps") or []
+    completed_steps = _get_state_attr(state, "completed_steps") or []
 
-    allowed = {
-        "sql_agent",
-        "client_flow_agent",
-        "network_optimizer_agent",
-        "relocation_agent",
-        "aggregator",
-    }
-    if next_agent in allowed:
+    # Проверяем готовые шаги для параллельного запуска
+    ready = _get_ready_steps(plan_steps, completed_steps)
+
+    if len(ready) > 1:
+        # Группируем по parallel_group
+        grouped: dict[str, List[PlanStep]] = {}
+        for step in ready:
+            if step.parallel_group:
+                grouped.setdefault(step.parallel_group, []).append(step)
+
+        # Если есть группа из 2+ шагов — запускаем параллельно
+        for group_name, group_steps in grouped.items():
+            if len(group_steps) > 1:
+                state_dict = (
+                    state.model_dump() if hasattr(state, "model_dump") else dict(state)
+                )
+                logger.info(
+                    "ThreadID: %s: параллельный запуск %d шагов группы '%s': %s",
+                    tid, len(group_steps), group_name,
+                    [s.step_id for s in group_steps],
+                )
+                return [
+                    Send(step.agent, {**state_dict, "current_step_id": step.step_id})
+                    for step in group_steps
+                ]
+
+    # Обычный маршрут — один шаг
+    # "__parallel__" не попадает в allowed — роутер уже обработал параллельный случай выше
+    if next_agent in _ALLOWED_NEXT_AGENTS:
         logger.info("ThreadID: %s: orchestrator → %s", tid, next_agent)
         return next_agent
 
-    logger.info("ThreadID: %s: orchestrator fallback → aggregator (next_agent=%s)", tid, next_agent)
+    logger.info(
+        "ThreadID: %s: orchestrator fallback → aggregator (next_agent=%s)", tid, next_agent
+    )
     return "aggregator"
 
 
@@ -106,7 +162,7 @@ class AgentGraph:
 
     Роутеры:
         route_from_control      — старт / прямой ответ / replan / retry / end после критика
-        route_from_orchestrator — выбор следующего воркера или aggregator
+        route_from_orchestrator — один воркер (str) или параллельный запуск (List[Send])
 
     Критик всегда возвращает управление в control_layer (жёсткое ребро).
     Вся логика разветвления после критика живёт в route_from_control.
@@ -164,14 +220,12 @@ class AgentGraph:
         workflow.set_entry_point("control_layer")
 
         # ── control_layer → условный переход ──────────────────────────────
-        # Покрывает: старт пайплайна / прямой ответ /
-        #            replan (plan_failed) / retry (step_failed) / end
         workflow.add_conditional_edges(
             "control_layer",
             route_from_control,
             {
                 "planner_agent": "planner_agent",
-                "orchestrator": "orchestrator",  # step_failed: retry конкретного шага
+                "orchestrator": "orchestrator",
                 "end": END,
             },
         )
@@ -179,6 +233,8 @@ class AgentGraph:
         # ── Основной поток ────────────────────────────────────────────────
         workflow.add_edge("planner_agent", "orchestrator")
 
+        # route_from_orchestrator возвращает str (один шаг) или List[Send] (параллельно).
+        # LangGraph обрабатывает Send автоматически — явного ключа в маппинге не нужно.
         workflow.add_conditional_edges(
             "orchestrator",
             route_from_orchestrator,
@@ -200,9 +256,8 @@ class AgentGraph:
         # ── Финальные стадии ──────────────────────────────────────────────
         workflow.add_edge("aggregator", "critic")
 
-        # Критик → control_layer: жёсткое ребро (не условный переход).
-        # Разветвление по critic_issue_type происходит внутри route_from_control.
+        # Критик → control_layer: жёсткое ребро.
+        # Разветвление по critic_issue_type происходит в route_from_control.
         workflow.add_edge("critic", "control_layer")
 
         return workflow.compile(checkpointer=self.memory)
-        

@@ -1,100 +1,134 @@
+import json
+from typing import Any, Dict
+
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.prebuilt import create_react_agent
-from langgraph.errors import ParentCommand
-from typing import Dict, Any
 
 from src.core.agents.network_optimizer_agent.network_optimizer_tools import (
-    calculate_vsp_closure,
-    calculate_vsp_relocation,
-    get_vsp_info
+    calculate_close_vsp,
 )
 from src.core.agents.network_optimizer_agent.system_prompt import NETWORK_OPTIMIZER_PROMPT
-from src.core.graph_state import GraphState
+from src.core.graph_state import GraphState, StepResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+def _build_payload(state: GraphState, task: str, dependent_results: Dict[str, str]) -> str:
+    """Формирует JSON-контекст для ReAct агента."""
+    payload: Dict[str, Any] = {
+        "task": task,
+        "urf_codes": state.urf_codes,
+    }
+    if dependent_results:
+        payload["dependent_results"] = dependent_results
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _extract_result(response: dict) -> str:
+    """Извлекает финальный текст ответа из истории сообщений ReAct агента."""
+    for msg in reversed(response.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content).strip()
+    return ""
+
+
+def _extract_tools_called(response: dict) -> list:
+    """Извлекает список вызванных инструментов из истории сообщений."""
+    tools_called = []
+    for msg in response.get("messages", []):
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls"):
+            for tc in msg.tool_calls or []:
+                tools_called.append({
+                    "tool": tc.get("name"),
+                    "args": tc.get("args", {}),
+                })
+    return tools_called
+
+
 class NetworkOptimizerAgent:
-    """
-    Агент, который рассчитывает последствия закрытия/перемещения ВСП
+    """Агент расчёта последствий закрытия/возврата ВСП в целевую сеть.
+
+    Зона ответственности:
+      - закрытие одного или нескольких ВСП (calculate_close_vsp)
+      - возврат ВСП в целевую сеть (calculate_close_vsp с cs_urf_list)
+      - комбинации закрытия и возврата
+      - сравнение сценариев закрытия
+
+    Перемещение ВСП на новую точку — зона relocation_agent.
+    Справочные данные без сценарного расчёта — зона sql_agent.
+
+    Читает из state: plan_steps[current_step_id].task, step_results[depends_on], urf_codes.
+    Пишет в state:   step_results[current_step_id], completed_steps.
     """
 
     def __init__(self, llm: BaseChatModel):
-        self.llm = llm
-        self.tools = [calculate_vsp_closure, calculate_vsp_relocation, get_vsp_info]
-        self.tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools])
-
-        self.prompt = NETWORK_OPTIMIZER_PROMPT.format(tools_description=self.tools_description)
-        self.agent = create_react_agent(model=self.llm,
-                                        tools=self.tools,
-                                        prompt=self.prompt)
+        self.tools = [calculate_close_vsp]
+        self.agent = create_react_agent(
+            model=llm,
+            tools=self.tools,
+            prompt=NETWORK_OPTIMIZER_PROMPT.strip(),
+        )
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
-        """
-        Основной метод обработки состояния графа.
-        Вызывается из LangGraph как нода.
-        """
+        """Точка входа ноды. Возвращает патч GraphState."""
+        current_step_id = state.current_step_id
+        logger.debug(
+            "ThreadID: %s: NetworkOptimizerAgent старт (шаг: %s)",
+            state.thread_id, current_step_id,
+        )
+
+        # Находим задачу для текущего шага
+        step = next(
+            (s for s in state.plan_steps if s.step_id == current_step_id), None
+        )
+        task = step.task if step else state.user_query
+
+        # Собираем результаты зависимых шагов — агент читает их через dependent_results
+        dependent_results: Dict[str, str] = {}
+        if step:
+            for dep_id in step.depends_on:
+                dep = state.step_results.get(dep_id)
+                if dep and dep.result:
+                    dependent_results[dep_id] = dep.result
+
         try:
-            if not state.user_query and not state.messages:
-                raise ValueError("No query or messages provided")
+            response = self.agent.invoke({
+                "messages": [HumanMessage(content=_build_payload(state, task, dependent_results))]
+            })
 
-            logger.info(f"ThreadID: {state.thread_id}: Starting NetworkOptimizer agent")
+            result_text = _extract_result(response)
+            tools_called = _extract_tools_called(response)
 
-            context_parts = []
-            if state.query_params:
-                params = state.query_params
-                logger.info(f"ThreadID: {state.thread_id}: Получены параметры запроса: "
-                            f"is_close={params.is_close}, "
-                            f"is_cs={params.is_cs}, "
-                            f"is_bt={params.is_bt}, "
-                            f"координат={len(params.coordinates)}")
-
-                context_parts.append("## ПАРАМЕТРЫ ЗАПРОСА:")
-                if params.is_close:
-                    context_parts.append(f"ВСП для закрытия (is_close): {params.is_close}")
-                if params.is_cs:
-                    context_parts.append(f"ВСП для возврата в сеть (is_cs): {params.is_cs}")
-                if params.is_bt:
-                    context_parts.append(f"ВСП для приема клиентопотока (is_bt): {params.is_bt}")
-                if params.coordinates:
-                    context_parts.append(f"Координаты ВСП: {params.coordinates}")
-            else:
-                logger.warning(f"ThreadID: {state.thread_id}: Параметры запроса не найдены в state")
-
-            if state.messages:
-                messages = state.messages.copy()
-                if context_parts:
-                    context_message = HumanMessage(content="\n".join(context_parts))
-                    messages.append(context_message)
-            else:
-                user_content = state.user_query
-                if context_parts:
-                    user_content = "\n\n".join([state.user_query] + context_parts)
-                messages = [HumanMessage(content=user_content)]
-
-            resp = self.agent.invoke({"messages": messages})
-
-            raw = resp["messages"][-1].content if resp["messages"] else ""
-            out = raw if isinstance(raw, str) else str(raw)
             logger.info(
-                "ThreadID: %s: NetworkOptimizer завершён, result_len=%s",
-                state.thread_id,
-                len(out),
+                "ThreadID: %s: NetworkOptimizerAgent завершён (шаг: %s, result_len=%d, tools=%d)",
+                state.thread_id, current_step_id, len(result_text), len(tools_called),
             )
-            return {
-                "messages": resp["messages"],
-                "result": out,
-            }
 
-        except ParentCommand:
-            logger.info(f"ThreadID: {state.thread_id}: NetworkOptimizer agent completed, transitioning to next agent")
-            raise
+            step_result = StepResult(
+                agent="network_optimizer_agent",
+                task=task,
+                result=result_text,
+                tools_called=tools_called,
+                status="ok",
+            )
+
         except Exception as e:
-            logger.error(f"ThreadID: {state.thread_id}: NetworkOptimizer agent error: {str(e)}")
-            return {
-                "error": str(e),
-                "agent_type": "network_optimizer_agent",
-                "error_type": type(e).__name__
-            }
+            logger.error(
+                "ThreadID: %s: NetworkOptimizerAgent ошибка (шаг: %s): %s",
+                state.thread_id, current_step_id, e, exc_info=True,
+            )
+            step_result = StepResult(
+                agent="network_optimizer_agent",
+                task=task,
+                result=str(e),
+                status="failed",
+            )
+
+        # Передаём только новый ключ — reducer (_merge_step_results, _merge_completed_steps)
+        # сам объединит с текущим значением state. Это корректно и при параллельном Send.
+        return {
+            "step_results": {current_step_id: step_result},
+            "completed_steps": [current_step_id],
+        }

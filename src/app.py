@@ -1,10 +1,19 @@
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Должно выполняться до любых `from src...`, иначе Streamlit не видит пакет `src`.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+load_dotenv(PROJECT_ROOT / ".env")
+
 from typing import List
 from uuid import uuid4
-from pathlib import Path
 
 import streamlit as st
 from sqlalchemy import inspect, text
-import sys
 
 from src.core.agents.service_manager import service_manager
 from src.core.llm_utils.agent_init import start_agent
@@ -13,9 +22,6 @@ from src.file_upload.processor import VSPDataProcessor, logger
 from src.file_upload.new_solution_processor import NewSolutionProcessor
 from src.file_upload.client_flow_processor import ClientFlowProcessor
 from config import REPORTS_DIRECTORY
-
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class AreaAssistantApp:

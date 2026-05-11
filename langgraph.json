@@ -1,0 +1,8 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "agent_ecs": "src.core.studio_graph:graph"
+  }
+}

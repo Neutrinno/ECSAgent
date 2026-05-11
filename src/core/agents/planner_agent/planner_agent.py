@@ -94,7 +94,11 @@ class PlannerAgent:
         self._structured = self._try_structured_output()
 
     def _try_structured_output(self):
-        """Пробует подключить structured output; при неудаче вернёт None → JSON fallback."""
+        """Пробует подключить structured output; при неудаче вернёт None → JSON fallback.
+
+        Используем llm.with_structured_output напрямую — без ChatPromptTemplate,
+        т.к. промпт статичный и передаётся через SystemMessage в _invoke_llm.
+        """
         try:
             from pydantic import BaseModel, Field
 
@@ -103,29 +107,26 @@ class PlannerAgent:
                 plan_steps: List[Dict[str, Any]] = Field(description="Шаги плана")
                 plan_risks: List[str] = Field(default_factory=list)
 
-            from langchain_core.prompts import ChatPromptTemplate
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", PLANNER_AGENT_PROMPT.strip()),
-                ("human", "{user_content}"),
-            ])
-            return prompt | self.llm.with_structured_output(_PlanSchema)
+            return self.llm.with_structured_output(_PlanSchema)
         except Exception as e:
             logger.warning("Planner: structured_output недоступен (%s), используем JSON fallback", e)
             return None
 
     def _invoke_llm(self, user_content: str) -> Dict[str, Any]:
         """Вызывает LLM — через structured output или JSON fallback."""
+        messages = [
+            SystemMessage(content=PLANNER_AGENT_PROMPT.strip()),
+            HumanMessage(content=user_content),
+        ]
+
         if self._structured is not None:
             try:
-                result = self._structured.invoke({"user_content": user_content})
+                result = self._structured.invoke(messages)
                 return result.model_dump() if hasattr(result, "model_dump") else dict(result)
             except Exception as e:
                 logger.warning("Planner: structured_output не сработал (%s), fallback", e)
 
-        response = self.llm.invoke([
-            SystemMessage(content=PLANNER_AGENT_PROMPT.strip()),
-            HumanMessage(content=user_content),
-        ])
+        response = self.llm.invoke(messages)
         raw = response.content if isinstance(response.content, str) else str(response.content)
         return _extract_json(raw)
 
@@ -199,3 +200,4 @@ class PlannerAgent:
                 "status": "failed",
                 "step_results": {**state.step_results, "_meta_plan": meta_err},
             }
+            

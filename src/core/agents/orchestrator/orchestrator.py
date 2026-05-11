@@ -171,8 +171,20 @@ class Orchestrator:
             return ready[0].agent, ready[0].step_id, f"следующий шаг по плану: {ready[0].step_id}"
 
         if len(ready) > 1:
-            # Несколько готовых шагов — пока берём первый
-            # (параллельный запуск через Send будет добавлен позже)
+            # Проверяем есть ли параллельная группа среди готовых шагов
+            groups: dict[str, list] = {}
+            for step in ready:
+                if step.parallel_group:
+                    groups.setdefault(step.parallel_group, []).append(step)
+
+            for group_name, group_steps in groups.items():
+                if len(group_steps) > 1:
+                    # Сигнализируем роутеру: он сам найдёт готовые шаги и запустит Send.
+                    # Роутер вызывает _get_ready_steps независимо и не смотрит на next_agent
+                    # при наличии параллельной группы.
+                    return "__parallel__", None, f"параллельная группа '{group_name}'"
+
+            # Нет параллельной группы — берём первый готовый шаг
             step = ready[0]
             return step.agent, step.step_id, f"первый из {len(ready)} готовых шагов: {step.step_id}"
 

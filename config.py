@@ -20,3 +20,8 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "qwen/qwen3.6-flash")
 
 REPORTS_DIRECTORY = "data"
+
+LANGSMITH_TRACING = os.environ.get("LANGSMITH_TRACING", "false").lower() in ("true", "1", "yes")
+LANGSMITH_ENDPOINT = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+LANGSMITH_API_KEY = os.environ.get("LANGSMITH_API_KEY")
+LANGSMITH_PROJECT = os.environ.get("LANGSMITH_PROJECT", "default")

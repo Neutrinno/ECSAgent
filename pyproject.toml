@@ -29,6 +29,7 @@ tabulate = "0.10.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.1"
+langgraph-cli = {extras = ["inmem"], version = "^0.4.25"}
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
