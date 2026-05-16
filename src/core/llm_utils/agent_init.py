@@ -5,7 +5,10 @@ import ast
 
 from src.core.agents.service_manager import service_manager
 from src.core.graph_state import GraphState
+from src.core.llm_utils.final_result_sanitize import sanitize_final_result
 from src.utils.logger import get_logger
+
+_RESULT_PREVIEW_LEN = 500
 
 logger = get_logger(__name__)
 
@@ -29,6 +32,38 @@ def _format_message_for_debug(message: BaseMessage) -> Dict[str, Any]:
             ]
 
     return msg_info
+
+
+def _step_result_to_compact(sr) -> Dict[str, Any]:
+    """Сжатое представление StepResult для отладки UI."""
+    if sr is None:
+        return {}
+    if hasattr(sr, "model_dump"):
+        d = sr.model_dump()
+    elif isinstance(sr, dict):
+        d = sr
+    else:
+        return {}
+    res = d.get("result")
+    if res is None:
+        rstr = ""
+    elif isinstance(res, str):
+        rstr = res
+    else:
+        rstr = str(res)
+    preview = rstr[:_RESULT_PREVIEW_LEN]
+    if len(rstr) > _RESULT_PREVIEW_LEN:
+        preview += f"... [всего символов: {len(rstr)}]"
+    task = d.get("task") or ""
+    if isinstance(task, str) and len(task) > 240:
+        task = task[:240] + "..."
+    return {
+        "agent": d.get("agent"),
+        "task": task,
+        "status": d.get("status"),
+        "result_preview": preview,
+        "tools_called": d.get("tools_called") or [],
+    }
 
 
 def _format_state_for_debug(final_state) -> Dict[str, Any]:
@@ -68,9 +103,59 @@ def _format_state_for_debug(final_state) -> Dict[str, Any]:
         "user_query": user_query,
         "current_agent": current_agent,
         "result": result,
-        "final_result": final_result,
+        "final_result": sanitize_final_result(final_result) if final_result else final_result,
         "error": error,
     }
+
+    plan_summary = _get(final_state, "plan_summary")
+    if plan_summary:
+        debug_info["plan_summary"] = plan_summary
+
+    plan_steps_raw = _get(final_state, "plan_steps") or []
+    plan_steps_list = []
+    for step in plan_steps_raw:
+        if hasattr(step, "model_dump"):
+            plan_steps_list.append(step.model_dump())
+        elif isinstance(step, dict):
+            plan_steps_list.append(step)
+    if plan_steps_list:
+        debug_info["plan_steps"] = plan_steps_list
+
+    step_results_raw = _get(final_state, "step_results") or {}
+    if isinstance(step_results_raw, dict) and step_results_raw:
+        step_debug = {}
+        for key, val in step_results_raw.items():
+            step_debug[key] = _step_result_to_compact(val)
+        debug_info["step_results"] = step_debug
+
+        meta_keys = ("_meta_plan", "_meta_orchestrator")
+        meta_block = {k: step_debug[k] for k in meta_keys if k in step_debug}
+        if meta_block:
+            debug_info["meta"] = meta_block
+
+        timeline = []
+        for step in plan_steps_raw:
+            if hasattr(step, "model_dump"):
+                sd = step.model_dump()
+            elif isinstance(step, dict):
+                sd = step
+            else:
+                continue
+            sid = sd.get("step_id")
+            entry = {
+                "step_id": sid,
+                "agent": sd.get("agent"),
+                "task": (sd.get("task") or "")[:240],
+            }
+            if sid and sid in step_debug:
+                entry.update(step_debug[sid])
+            elif sid:
+                entry["status"] = "missing"
+                entry["result_preview"] = None
+                entry["tools_called"] = []
+            timeline.append(entry)
+        if timeline:
+            debug_info["execution_timeline"] = timeline
 
     if messages:
         debug_info["messages"] = [
@@ -190,8 +275,9 @@ def start_agent(user_query: str, thread_id: UUID = None):
         }
 
         if final_result:
-            logger.info(f"ThreadID: {thread_id}: Обработка завершена успешно. Длина результата: {len(final_result)}")
-            result_data["result"] = final_result
+            cleaned = sanitize_final_result(final_result)
+            logger.info(f"ThreadID: {thread_id}: Обработка завершена успешно. Длина результата: {len(cleaned)}")
+            result_data["result"] = cleaned
             return result_data
 
         err_msg = None

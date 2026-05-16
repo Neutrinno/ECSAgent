@@ -349,6 +349,21 @@ class AreaAssistantApp:
 
                             st.divider()
 
+                            if "execution_timeline" in debug_info and debug_info["execution_timeline"]:
+                                st.markdown("**Цепочка шагов плана**")
+                                st.json(debug_info["execution_timeline"])
+                                has_output = True
+
+                            if "plan_summary" in debug_info and debug_info["plan_summary"]:
+                                st.markdown("**Краткая стратегия (plan_summary)**")
+                                st.code(str(debug_info["plan_summary"]), language="text")
+                                has_output = True
+
+                            if "step_results" in debug_info and debug_info["step_results"]:
+                                st.markdown("**Результаты по шагам (step_results)**")
+                                st.json(debug_info["step_results"])
+                                has_output = True
+
                             # Результаты
                             if "result" in debug_info and debug_info["result"]:
                                 st.markdown("**📊 SQL Результат:**")

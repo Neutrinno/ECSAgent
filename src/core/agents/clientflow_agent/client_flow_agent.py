@@ -8,7 +8,7 @@ from langgraph.prebuilt import create_react_agent
 
 from src.core.agents.clientflow_agent.system_prompt import CLIENT_FLOW_PROMPT
 from src.core.agents.sql_agent.tools import execute_sql_query, get_table_schema
-from src.core.graph_state import GraphState, StepResult
+from src.core.graph_state import GraphState, StepResult, as_graph_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +69,7 @@ class ClientFlowAgent:
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Точка входа ноды. Возвращает патч GraphState."""
+        state = as_graph_state(state)
         current_step_id = state.current_step_id
         if not current_step_id:
             msg = "ClientFlowAgent: current_step_id отсутствует, выполнение шага невозможно"

@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from uuid import UUID
 
 from langchain_core.messages import BaseMessage
@@ -93,17 +93,11 @@ class GraphState(BaseModel):
     plan_risks: List[str] = Field(default_factory=list)
 
     # ── Прогресс оркестратора ─────────────────────────────────────────────
-    # Annotated + reducer: при параллельном Send несколько воркеров добавляют
-    # свой step_id одновременно — без reducer второй затрёт первый.
     completed_steps: Annotated[List[str], _merge_completed_steps] = Field(default_factory=list)
     current_step_id: Optional[str] = None
     next_agent: Optional[str] = None
 
     # ── Результаты агентов ────────────────────────────────────────────────
-    # Annotated + reducer: при параллельном Send два воркера пишут в разные
-    # ключи одновременно — без reducer второй патч затрёт результат первого.
-    # Воркеры пишут в "step_N", служебные агенты — в "_meta_*".
-    # Агрегатор фильтрует: {k: v for k, v in step_results.items() if not k.startswith("_meta")}
     step_results: Annotated[Dict[str, StepResult], _merge_step_results] = Field(
         default_factory=dict
     )
@@ -125,3 +119,10 @@ class GraphState(BaseModel):
     status: Literal["in_progress", "ok", "failed"] = "in_progress"
     retry_count: int = 0
     error: Optional[str] = None
+
+
+def as_graph_state(state: Union[GraphState, Dict[str, Any]]) -> GraphState:
+    """Вход ноды после параллельного Send — dict (см. graph.py route_from_orchestrator); иначе GraphState."""
+    if isinstance(state, GraphState):
+        return state
+    return GraphState.model_validate(state)

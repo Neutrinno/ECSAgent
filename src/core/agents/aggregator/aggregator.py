@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.agents.aggregator.system_prompt import AGGREGATOR_PROMPT
 from src.core.graph_state import GraphState, StepResult
+from src.core.llm_utils.final_result_sanitize import sanitize_final_result
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -79,6 +80,8 @@ class Aggregator:
                 v.result for v in worker_results.values()
                 if v.result and v.status == "ok"
             ) or "Не удалось сформировать ответ."
+
+        final_result = sanitize_final_result(final_result)
 
         logger.info(
             "ThreadID: %s: Aggregator сформировал ответ (len=%d)",

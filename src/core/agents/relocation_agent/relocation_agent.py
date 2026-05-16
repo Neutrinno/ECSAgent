@@ -7,7 +7,7 @@ from langgraph.prebuilt import create_react_agent
 
 from src.core.agents.relocation_agent.relocation_agent_tools import RELOCATION_AGENT_TOOLS
 from src.core.agents.relocation_agent.system_prompt import RELOCATION_AGENT_PROMPT
-from src.core.graph_state import GraphState, StepResult
+from src.core.graph_state import GraphState, StepResult, as_graph_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -87,6 +87,7 @@ class RelocationAgent:
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Точка входа ноды. Возвращает патч GraphState."""
+        state = as_graph_state(state)
         current_step_id = state.current_step_id
         if not current_step_id:
             msg = "RelocationAgent: current_step_id отсутствует, выполнение шага невозможно"

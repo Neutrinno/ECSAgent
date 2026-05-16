@@ -37,6 +37,7 @@ class ServiceManager:
         self._sql_agent = None
         self._client_flow_agent = None
         self._agent_graph = None
+        self._studio_graph = None
 
         logger.info("ServiceManager создан (еще не инициализирован)")
 
@@ -91,7 +92,7 @@ class ServiceManager:
 
                 logger.debug("Инициализация графа агентов...")
                 from src.core.graph import AgentGraph
-                self._agent_graph = AgentGraph(
+                graph_common = dict(
                     control_layer=self._control_layer,
                     planner_agent=self._planner_agent,
                     orchestrator=self._orchestrator,
@@ -101,7 +102,10 @@ class ServiceManager:
                     relocation_agent=self._relocation_agent,
                     aggregator=self._aggregator,
                     critic=self._critic,
-                ).graph
+                )
+                self._agent_graph = AgentGraph(**graph_common, with_checkpointer=True).graph
+                # LangGraph Studio / API: свой checkpointer запрещён, персистентность даёт рантайм.
+                self._studio_graph = AgentGraph(**graph_common, with_checkpointer=False).graph
                 logger.info("Граф агентов инициализирован")
 
                 self._initialized = True
@@ -160,6 +164,13 @@ class ServiceManager:
         if not self._initialized:
             self.initialize()
         return self._agent_graph
+
+    @property
+    def studio_graph(self):
+        """Граф без кастомного checkpointer — для LangGraph Studio / langgraph dev."""
+        if not self._initialized:
+            self.initialize()
+        return self._studio_graph
 
     @property
     def is_initialized(self) -> bool:

@@ -1,0 +1,3 @@
+[virtualenvs]
+# Не использовать ./.venv в корне: при смешении Windows-venv и WSL Poetry ломается (нет bin/python).
+in-project = false

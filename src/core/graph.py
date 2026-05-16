@@ -179,6 +179,8 @@ class AgentGraph:
         relocation_agent,
         aggregator,
         critic,
+        *,
+        with_checkpointer: bool = True,
     ):
         # Supervisor
         self.control_layer = control_layer
@@ -197,7 +199,7 @@ class AgentGraph:
         self.aggregator = aggregator
         self.critic = critic
 
-        self.memory = MemorySaver()
+        self.memory = MemorySaver() if with_checkpointer else None
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -260,4 +262,6 @@ class AgentGraph:
         # Разветвление по critic_issue_type происходит в route_from_control.
         workflow.add_edge("critic", "control_layer")
 
-        return workflow.compile(checkpointer=self.memory)
+        if self.memory is not None:
+            return workflow.compile(checkpointer=self.memory)
+        return workflow.compile()

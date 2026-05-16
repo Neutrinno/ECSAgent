@@ -11,7 +11,7 @@ from src.core.agents.sql_agent.tools import (
     get_table_schema,
     list_tables_with_descriptions,
 )
-from src.core.graph_state import GraphState, StepResult
+from src.core.graph_state import GraphState, StepResult, as_graph_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,6 +74,7 @@ class SQLAgent:
 
     def process_state(self, state: GraphState) -> Dict[str, Any]:
         """Точка входа ноды. Возвращает патч GraphState."""
+        state = as_graph_state(state)
         current_step_id = state.current_step_id
         if not current_step_id:
             msg = "SQLAgent: current_step_id отсутствует, выполнение шага невозможно"

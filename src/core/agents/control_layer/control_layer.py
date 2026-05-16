@@ -88,15 +88,26 @@ class ControlLayer:
         if state.critic_issue_type == "need_clarify":
             return self._handle_clarify(state)
 
+        # После критика: replan / retry шага — ReAct control не нужен.
+        # Плюс сохраняем critic_issue_type для route_from_control (иначе уйдём в planner вместо orchestrator).
+        if state.critic_issue_type in ("step_failed", "plan_failed"):
+            logger.info(
+                "ControlLayer: critic_issue_type=%s — без повторного ReAct",
+                state.critic_issue_type,
+            )
+            return {}
+
         # Первый вход — интерпретация запроса
         return self._handle_initial(state)
 
     def _handle_initial(self, state: GraphState) -> Dict[str, Any]:
         """Первый вход: интерпретация запроса, резолюция urf_code."""
-        messages = state.messages.copy()
-        # user_query обычно уже добавлен в start_agent; добавляем только если история пуста.
+        # GigaChat: с привязанными tools нельзя слать историю с чужими AIMessage+tool_calls
+        # (воркеры не перезаписывают messages — в state остаётся trace первого ReAct control).
+        user_q = (state.user_query or "").strip()
+        messages = [HumanMessage(content=user_q)] if user_q else state.messages.copy()
         if not messages and state.user_query:
-            messages.append(HumanMessage(content=state.user_query))
+            messages = [HumanMessage(content=state.user_query)]
 
         response = self.agent.invoke({"messages": messages})
         output_messages = response.get("messages") or messages
@@ -120,15 +131,15 @@ class ControlLayer:
         if tool_error:
             logger.info("ControlLayer: ошибка get_urf_code: %s", tool_error)
             clarification = (
-                "Не удалось найти ВСП по указанному номеру. "
-                "Пожалуйста, уточните номер в формате XXXX_XXXXX (например, 9043_342)."
+                "Не получилось найти ВСП по указанному номеру. "
+                "Проверьте корректность и пришлите номер в формате ГОСБ_ВСП — например, 9043_342."
             )
             return {
                 "messages": output_messages,
                 "control_layer_answer": clarification,
                 "critic_issue_type": "need_clarify",
                 "status": "in_progress",
-                "final_result": None,
+                "final_result": clarification,
             }
 
         # Прямой ответ без пайплайна (общий вопрос, приветствие и т.п.)
@@ -159,5 +170,5 @@ class ControlLayer:
             "control_layer_answer": clarification,
             "critic_issue_type": "need_clarify",  # роутер увидит → end
             "status": "in_progress",
-            "final_result": None,
+            "final_result": clarification,
         }
