@@ -55,8 +55,8 @@ control_layer → planner → orchestrator ⇄ воркеры → aggregator →
 ### 1. Клонирование и зависимости
 
 ```bash
-git clone https://github.com/Neutrinno/ECSAgent-.git
-cd ECSAgent-
+git clone https://gitverse.ru/Neutrinno/ECSAgent.git
+cd ECSAgent
 
 poetry install
 ```
