@@ -28,20 +28,33 @@ def _get_current_plan_results(state: GraphState) -> Dict[str, StepResult]:
     return results
 
 
+def _ordered_step_ids(state: GraphState, worker_results: Dict[str, StepResult]) -> list[str]:
+    """Порядок шагов по plan_steps; хвост — ключи не из плана (на всякий случай)."""
+    from_plan = [
+        s.step_id
+        for s in state.plan_steps
+        if s.agent != "aggregator" and s.step_id in worker_results
+    ]
+    tail = [sid for sid in worker_results if sid not in from_plan]
+    return from_plan + tail
+
+
 def _build_payload(state: GraphState, worker_results: Dict[str, StepResult]) -> str:
     """Формирует JSON-контекст для LLM."""
+    ordered_ids = _ordered_step_ids(state, worker_results)
+    step_results_payload = {
+        step_id: {
+            "agent": worker_results[step_id].agent,
+            "task": worker_results[step_id].task,
+            "result": worker_results[step_id].result,
+            "status": worker_results[step_id].status,
+        }
+        for step_id in ordered_ids
+    }
     payload = {
         "user_query": state.user_query,
         "plan_summary": state.plan_summary or "",
-        "step_results": {
-            k: {
-                "agent": v.agent,
-                "task": v.task,
-                "result": v.result,
-                "status": v.status,
-            }
-            for k, v in worker_results.items()
-        },
+        "step_results": step_results_payload,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
