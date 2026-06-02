@@ -8,7 +8,7 @@
 
 ## Как устроено
 
-<img width="1139" height="960" alt="image" src="https://github.com/user-attachments/assets/8d36af0e-13cf-43ee-80b7-5cbc91429ef1" />
+<img width="978" height="660" alt="image" src="https://github.com/user-attachments/assets/4453aab3-8beb-4eb6-b2a0-611192760cd5" />
 
 Запрос обрабатывается не одной моделью, а **графом агентов** с общим состоянием:
 
