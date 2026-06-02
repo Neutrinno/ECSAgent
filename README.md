@@ -3,6 +3,8 @@
 Ассистент для аналитиков сети офисов банка (ВСП). Пользователь задаёт вопрос в чате на естественном языке — система отвечает по данным отчётов: справка по офису, клиентопоток, сценарии закрытия и переноса, перетоки КП.
 
 **Стек:** LangGraph + LangChain, LLM (OpenRouter или GigaChat), SQLite, UI на Streamlit.
+<img width="1819" height="942" alt="image" src="https://github.com/user-attachments/assets/7bfcb031-6cca-40d8-a10a-0440969bb22d" />
+
 
 ## Как устроено
 
