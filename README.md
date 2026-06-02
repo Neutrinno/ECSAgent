@@ -36,18 +36,22 @@ control_layer → planner → orchestrator ⇄ воркеры → aggregator →
 ### 1. Клонирование
 
 ```bash
-git clone https://gitverse.ru/Neutrinno/ECSAgent.git
+git clone https://github.com/Neutrinno/ECSAgent.git
 cd ECSAgent
 
 poetry install
 ```
 
+Репозиторий: [github.com/Neutrinno/ECSAgent](https://github.com/Neutrinno/ECSAgent)
+
 ### 2. Переменные окружения
 
 ```bash
-cp env_example .env   # Linux / macOS
-copy env_example .env # Windows
+cp env_example .env      # Linux / macOS
+copy env_example .env    # Windows (cmd)
 ```
+
+Скопируйте шаблон [`env_example`](env_example) в `.env` в корне проекта (файл `.env` в Git не попадает).
 
 Обязательно для запуска:
 
