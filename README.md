@@ -1,58 +1,39 @@
 # AI-ассистент единой целевой сети
 
-Ассистент для аналитиков, которые работают с сетью офисов банка (ВСП). Вместо ручного поиска в Excel и разрозненных расчётов можно задать вопрос обычным языком: получить справку по офису, сравнить клиентопоток, оценить последствия закрытия или переноса точки, посмотреть перетоки КП между преемниками.
+Ассистент для аналитиков сети офисов банка (ВСП). Пользователь задаёт вопрос в чате на естественном языке — система отвечает по данным отчётов: справка по офису, клиентопоток, сценарии закрытия и переноса, перетоки КП.
 
-Данные лежат в SQLite: при старте приложение подгружает отчёты из каталога `data/` (площади, клиентский поток, новые решения). Ответы строятся на этой базе и на предметной логике сети (ЦС, преемники, доли перетока и т.д.).
+**Стек:** LangGraph + LangChain, LLM (OpenRouter или GigaChat), SQLite, UI на Streamlit.
 
-## Как устроена система
+## Как устроено
 
-Пользователь пишет в чат (**Streamlit**). Запрос попадает в граф агентов на **LangGraph** — это не один большой промпт, а цепочка ролей с общим состоянием (`GraphState`).
+Запрос обрабатывается не одной моделью, а **графом агентов** с общим состоянием:
 
-**Control Layer** — входная точка. Решает, можно ли ответить сразу (уточнение, простой вопрос) или нужен полный сценарий. После выполнения плана сюда же возвращается управление: финальный ответ пользователю формируется здесь.
-
-**Planner** — разбивает задачу на шаги: кого вызвать, в каком порядке, что зависит от чего. Несколько независимых шагов могут идти параллельно (группы в плане).
-
-**Orchestrator** — по плану запускает нужного исполнителя и следит, какие шаги уже сделаны. Когда все шаги закрыты — передаёт ход агрегатору.
-
-Исполнители (воркеры), у каждого своя зона:
-
-| Агент | Задачи |
-|-------|--------|
-| `sql_agent` | Выборки и агрегации по таблицам отчётов |
-| `client_flow_agent` | Клиентопоток, динамика, сравнения |
-| `network_optimizer_agent` | Сценарии изменения сети, закрытие/оптимизация |
-| `relocation_agent` | Переносы, перетоки КП, преемники |
-
-**Aggregator** собирает результаты шагов в один связный ответ.
-
-**Critic** проверяет результат: план не сработал, шаг упал, нужно уточнение у пользователя — или всё в порядке. При ошибке граф может уйти обратно в planner или orchestrator, а не отдавать «сырой» ответ.
-
-Схема потока:
+| Узел | Роль |
+|------|------|
+| **Control Layer** | Вход: понимает запрос, решает — ответить сразу или запустить полный сценарий; отдаёт финальный ответ |
+| **Planner** | Строит план шагов и зависимостей между ними |
+| **Orchestrator** | Запускает шаги по плану (в т.ч. параллельно) |
+| **Воркеры** | `sql_agent`, `client_flow_agent`, `network_optimizer_agent`, `relocation_agent` |
+| **Aggregator** | Собирает результаты шагов в один ответ |
+| **Critic** | Проверяет качество; при ошибке — возврат в planner или orchestrator |
 
 ```
 control_layer → planner → orchestrator ⇄ воркеры → aggregator → critic → control_layer
 ```
 
-Агенты работают через **LangChain** / **LangGraph**: каждый шаг графа — вызов LLM и инструментов. Без настроенного провайдера модели запросы не пойдут.
+При старте Excel из `data/` загружается в локальную SQLite; дальше воркеры работают с этой базой и инструментами.
 
-## Стек
+## Демо-данные для проверки
 
-| Компонент | Технология |
-|-----------|------------|
-| Оркестрация агентов | LangGraph, LangChain |
-| LLM | OpenRouter (по умолчанию) или GigaChat |
-| Хранение данных | SQLite |
-| UI | Streamlit |
-| Наблюдаемость | LangSmith (опционально) |
+В репозитории в `data/` включён **только** файл `Отчет по площади.xlsx` — **синтетические данные** для демонстрации на время сдачи диплома. Этого достаточно для базовой проверки (справка по ВСП).
 
-## Требования
-
-- Python 3.11–3.13
-- [Poetry](https://python-poetry.org/docs/#installation) или pip
+Файлы `Новые решения.xlsx` и `client_flow.xlsx` в репозиторий **не входят**; при необходимости их можно положить в `data/` локально.
 
 ## Быстрый старт
 
-### 1. Клонирование и зависимости
+**Требования:** Python 3.11–3.13, [Poetry](https://python-poetry.org/docs/#installation) или pip.
+
+### 1. Клонирование
 
 ```bash
 git clone https://gitverse.ru/Neutrinno/ECSAgent.git
@@ -61,115 +42,48 @@ cd ECSAgent
 poetry install
 ```
 
-### 2. Конфигурация окружения
-
-Создайте файл `.env` на основе шаблона:
+### 2. Переменные окружения
 
 ```bash
-# Windows
-copy env_example .env
-
-# Linux / macOS
-cp env_example .env
+cp env_example .env   # Linux / macOS
+copy env_example .env # Windows
 ```
 
-Заполните обязательные значения (см. раздел [Переменные окружения](#переменные-окружения)). Файл `.env` не должен попадать в систему контроля версий.
+Обязательно для запуска:
 
-**Минимум, чтобы завелись LangChain и граф агентов:**
+| Переменная | Описание |
+|------------|----------|
+| `LLM_PROVIDER` | `openrouter` (как в шаблоне) или `gigachat` |
+| `OPENROUTER_API_KEY` | Ключ [OpenRouter](https://openrouter.ai/keys) |
 
-1. `LLM_PROVIDER=openrouter` и непустой `OPENROUTER_API_KEY` (ключ на [openrouter.ai](https://openrouter.ai/keys)).
-2. При установке через pip — пакет `langchain-openai` (для OpenRouter; в `poetry install` уже входит).
+Остальные поля OpenRouter в `env_example` можно не менять. Файл `.env` не коммитить.
 
-**LangSmith** (логи и трассировка вызовов в [smith.langchain.com](https://smith.langchain.com/)):
+Для **GigaChat:** `LLM_PROVIDER=gigachat`, `GIGACHAT_URL`, сертификаты в `cert/cert_pem.txt` и `cert/private_key.txt`.
 
-- при `LANGSMITH_TRACING=true` обязателен `LANGSMITH_API_KEY` (создаётся в личном кабинете LangSmith → Settings → API Keys);
-- `LANGSMITH_PROJECT` — имя проекта, куда складываются трейсы (в шаблоне `AgentEcs`).
-- если трассировка не нужна, поставьте `LANGSMITH_TRACING=false` — остальные `LANGSMITH_*` можно не заполнять.
-
-Переменные из `.env` подхватываются при старте (`python-dotenv`); LangChain/LangSmith читают их из окружения автоматически.
-
-### 3. Исходные данные (опционально)
-
-Для полноценной работы с отчётами разместите Excel-файлы в каталоге `data/`:
-
-| Файл | Назначение |
-|------|------------|
-| `Отчет по площади.xlsx` | Основной отчёт по площадям ВСП |
-| `Новые решения.xlsx` | Данные по новым решениям |
-| `client_flow.xlsx` | Клиентский поток |
-
-Каталог `data/` создаётся автоматически при первом запуске.
-
-### 4. Запуск
+### 3. Запуск
 
 ```bash
 poetry run streamlit run src/app.py
 ```
 
-Приложение будет доступно по адресу, указанному в консоли (по умолчанию: http://localhost:8501).
+Откройте в браузере адрес из консоли (обычно http://localhost:8501).
 
-## Переменные окружения
+### 4. Пример запроса
 
-Полный шаблон — в файле [`env_example`](env_example).
+В чате UI:
 
-| Назначение | Что обязательно |
-|------------|-----------------|
-| Запуск LLM и графа | `LLM_PROVIDER`, `OPENROUTER_API_KEY` (или GigaChat + сертификаты) |
-| Трассировка LangSmith | `LANGSMITH_TRACING=true` → нужен `LANGSMITH_API_KEY` |
-
-### LLM (OpenRouter)
-
-| Переменная | Обязательность | Описание |
-|------------|----------------|----------|
-| `LLM_PROVIDER` | Да | Провайдер модели: `openrouter` или `gigachat` |
-| `OPENROUTER_API_KEY` | Да* | API-ключ [OpenRouter](https://openrouter.ai/) |
-| `OPENROUTER_BASE_URL` | Нет | Базовый URL API (по умолчанию: `https://openrouter.ai/api/v1`) |
-| `OPENROUTER_MODEL` | Нет | Идентификатор модели (по умолчанию: `qwen/qwen3.6-flash`) |
-
-\* Обязательно при `LLM_PROVIDER=openrouter`.
-
-### LangSmith (трассировка LangChain)
-
-| Переменная | Обязательность | Описание |
-|------------|----------------|----------|
-| `LANGSMITH_TRACING` | Нет | `true` — отправлять трейсы в LangSmith; `false` — выключить |
-| `LANGSMITH_API_KEY` | Да* | API-ключ из [LangSmith](https://smith.langchain.com/settings) |
-| `LANGSMITH_ENDPOINT` | Нет | Обычно не меняют: `https://api.smith.langchain.com` |
-| `LANGSMITH_PROJECT` | Нет | Имя проекта в UI LangSmith (в шаблоне: `AgentEcs`) |
-
-\* Обязательно, если `LANGSMITH_TRACING=true`. Без ключа при включённой трассировке возможны ошибки или пустые трейсы.
-
-### Пример `.env`
-
-```env
-LLM_PROVIDER=openrouter
-OPENROUTER_API_KEY=<your_api_key>
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=qwen/qwen3.6-flash
-
-LANGSMITH_TRACING=true
-LANGSMITH_ENDPOINT=https://api.smith.langchain.com
-LANGSMITH_API_KEY=<your_api_key>
-LANGSMITH_PROJECT=AgentEcs
+```
+Напиши номер всп, адрес, площадь и количество рабочих мест для ВСП 1775_175
 ```
 
-### Альтернатива: GigaChat
-
-При `LLM_PROVIDER=gigachat` укажите `GIGACHAT_URL` и разместите TLS-сертификаты:
-
-- `cert/cert_pem.txt`
-- `cert/private_key.txt`
+Ожидается ответ с полями по этому офису из демо-отчёта.
 
 ## Установка без Poetry
 
 ```bash
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# Linux / macOS
-# source .venv/bin/activate
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux / macOS
 
 pip install -r requirements.txt
 pip install langchain-openai
@@ -177,4 +91,17 @@ pip install langchain-openai
 streamlit run src/app.py
 ```
 
-Пакет `langchain-openai` требуется для работы через OpenRouter.
+---
+
+## LangSmith (опционально)
+
+Трассировка шагов графа в [LangSmith](https://smith.langchain.com/) — **не обязательна** для проверки работы системы.
+
+| Переменная | Описание |
+|------------|----------|
+| `LANGSMITH_TRACING` | `true` — включить, `false` — выключить |
+| `LANGSMITH_API_KEY` | Ключ из настроек LangSmith (нужен при `TRACING=true`) |
+| `LANGSMITH_PROJECT` | Имя проекта в UI (в шаблоне: `AgentEcs`) |
+| `LANGSMITH_ENDPOINT` | По умолчанию `https://api.smith.langchain.com` |
+
+Для сдачи достаточно `LANGSMITH_TRACING=false` — остальные `LANGSMITH_*` можно не заполнять.
