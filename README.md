@@ -8,6 +8,8 @@
 
 ## Как устроено
 
+<img width="1139" height="960" alt="image" src="https://github.com/user-attachments/assets/8d36af0e-13cf-43ee-80b7-5cbc91429ef1" />
+
 Запрос обрабатывается не одной моделью, а **графом агентов** с общим состоянием:
 
 | Узел | Роль |
@@ -22,9 +24,6 @@
 ```
 control_layer → planner → orchestrator ⇄ воркеры → aggregator → critic → control_layer
 ```
-
-<img width="1139" height="960" alt="image" src="https://github.com/user-attachments/assets/8d36af0e-13cf-43ee-80b7-5cbc91429ef1" />
-
 
 При старте Excel из `data/` загружается в локальную SQLite; дальше воркеры работают с этой базой и инструментами.
 
